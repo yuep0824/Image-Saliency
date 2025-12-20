@@ -7,14 +7,17 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from model import FCN8s_Baseline, UNet_Baseline
+from model import FCN8s_Baseline, UNet_Baseline, UNet_ResNet18, MobileNetV3_UNet, SwinUNet
 from utils import SaliencyDataset, eval_metrics, save_prediction, get_device
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Saliency Prediction Baseline')
-    parser.add_argument('--data_root', type=str, default='data', help='数据集根目录')
-    parser.add_argument('--model', type=str, default='unet', choices=['fcn', 'unet'], help='选择模型')
+    parser.add_argument('--train_root', type=str, default='./data/3-Saliency-TrainSet', help='训练集根目录')
+    parser.add_argument('--val_root', type=str, default='./data/3-Saliency-ValSet', help='验证集根目录')
+    parser.add_argument('--model', type=str, default='unet', 
+                        choices=['fcn', 'unet', 'unet-resnet18', 'mobilenetv3-unet', 'swin-unet'], 
+                        help='选择模型')
     parser.add_argument('--img_size', type=tuple, default=(256, 256), help='图像尺寸')
     parser.add_argument('--batch_size', type=int, default=8, help='批次大小')
     parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
@@ -51,8 +54,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
     print(f'Train Epoch {epoch} | Avg Loss: {avg_loss:.4f}')
     return avg_loss
 
-# ---------------------- 验证函数（适配多返回值+保存原始尺寸预测） ----------------------
-def validate(model, loader, criterion, device, save_dir):
+
+def validate(model, loader, criterion, device, save_dir, epoch):
     model.eval()
     total_loss = 0.0
     preds = []
@@ -64,29 +67,26 @@ def validate(model, loader, criterion, device, save_dir):
             imgs = imgs.to(device)
             masks = masks.to(device)
             
-            # 前向传播
             outputs = model(imgs)
             loss = criterion(outputs, masks)
             total_loss += loss.item()
             
-            # 转numpy计算指标（用resize后的掩码）
-            outputs_np = outputs.squeeze(1).cpu().numpy()  # [B, H, W]
-            masks_np = masks.squeeze(1).cpu().numpy()      # [B, H, W]
+            outputs_np = outputs.squeeze(1).cpu().numpy()
+            masks_np = masks.squeeze(1).cpu().numpy()
             preds.extend(outputs_np)
             gts.extend(masks_np)
             
-            # 保存预测结果（恢复到原始尺寸）
+            # 修复文件名epoch未定义问题
             for i, (ori_size, img_ori) in enumerate(zip(ori_sizes, img_oris)):
-                # 生成保存文件名（基于原始图像路径）
-                img_name = f"pred_{i}_{epoch}.png" if 'epoch' in locals() else f"pred_{i}.png"
+                img_name = f"pred_epoch{epoch}_{i}.png"
                 save_path = os.path.join(save_dir, 'preds', img_name)
                 save_prediction(outputs_np[i], save_path, ori_size)
     
-    # 计算指标
     avg_loss = total_loss / len(loader)
     avg_cc, avg_kl = eval_metrics(preds, gts)
     print(f'Validate | Avg Loss: {avg_loss:.4f} | CC: {avg_cc:.4f} | KL Div: {avg_kl:.4f}')
     return avg_loss, avg_cc, avg_kl
+
 
 
 def main():
@@ -117,6 +117,12 @@ def main():
         model = FCN8s_Baseline(num_classes=1).to(device)
     elif args.model == 'unet':
         model = UNet_Baseline(n_channels=3, n_classes=1).to(device)
+    elif args.model == 'unet-resnet18':
+        model = UNet_ResNet18(n_channels=3, n_classes=1).to(device)
+    elif args.model == 'mobilenetv3-unet':
+        model = MobileNetV3_UNet(n_channels=3, n_classes=1).to(device)
+    elif args.model == 'swin-unet':
+        model = SwinUNet(img_size=args.img_size[0], in_chans=3, num_classes=1).to(device)
     print(f'Loaded {args.model.upper()} model')
     
     # 3. 损失函数与优化器（回归任务用MSE）
@@ -127,7 +133,7 @@ def main():
     best_cc = 0.0
     for epoch in range(1, args.epochs + 1):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch)
-        val_loss, val_cc, val_kl = validate(model, val_loader, criterion, device, args.save_dir)
+        val_loss, val_cc, val_kl = validate(model, val_loader, criterion, device, args.save_dir, epoch)
         
         # 保存最优模型（按CC指标）
         if val_cc > best_cc:
