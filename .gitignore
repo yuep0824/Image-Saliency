@@ -1,7 +1,7 @@
-data/
-model/
 *.pyc
 __pycache__/
+data/
+model/
 .env
 output/
 data*
