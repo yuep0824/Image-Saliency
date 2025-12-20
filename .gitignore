@@ -1,6 +1,6 @@
-./data
-./model
+data/
+model/
 *.pyc
 __pycache__/
 .env
-./output
+output/
