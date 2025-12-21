@@ -5,6 +5,7 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 from skimage import metrics
+from scipy import stats
 
 # ---------------------- 替换为你的SaliencyDataset（修复潜在问题） ----------------------
 class SaliencyDataset(Dataset):
@@ -86,7 +87,7 @@ class SaliencyDataset(Dataset):
 def calculate_cc(pred, gt):
     pred_flat = pred.flatten()
     gt_flat = gt.flatten()
-    cc = metrics.pearson_correlation_coefficient(pred_flat, gt_flat)
+    cc, _ = stats.pearsonr(pred_flat, gt_flat)
     return cc
 
 def calculate_kl_div(pred, gt, eps=1e-8):

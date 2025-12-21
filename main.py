@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 
-from model import FCN8s_Baseline, UNet_Baseline, UNet_ResNet18, MobileNetV3_UNet, SwinUNet
+from model import FCN8s_Baseline, EnhancedFCN, UNet_Baseline, UNet_ResNet18, MobileNetV3_UNet, SwinUNet
 from utils import SaliencyDataset, eval_metrics, save_prediction, get_device
 from grad_cam import save_cam_visualizations
 
@@ -18,9 +18,9 @@ from grad_cam import save_cam_visualizations
 def parse_args():
     parser = argparse.ArgumentParser(description='Saliency Prediction Baseline')
     parser.add_argument('--data_root', type=str, default='./data', help='训练集根目录')
-    parser.add_argument('--model', type=str, default='unet', choices=['fcn', 'unet', 'unet-resnet18', 'mobilenetv3-unet', 'swin-unet'], help='选择模型')
+    parser.add_argument('--model', type=str, default='mobilenetv3-unet', choices=['fcn', 'fcn_enhance', 'unet', 'unet-resnet18', 'mobilenetv3-unet', 'swin-unet'], help='选择模型')
     parser.add_argument('--img_size', type=tuple, default=(256, 256), help='图像尺寸')
-    parser.add_argument('--batch_size', type=int, default=8, help='批次大小')
+    parser.add_argument('--batch_size', type=int, default=16, help='批次大小')
     parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
     parser.add_argument('--save_dir', type=str, default='output', help='输出保存目录')
@@ -51,7 +51,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
     return avg_loss
 
 
-def validate(model, loader, criterion, device, save_dir, epoch):
+def validate(model, loader, criterion, device, save_dir, epoch, model_name):
     model.eval()
     total_loss = 0.0
     preds = []
@@ -63,12 +63,10 @@ def validate(model, loader, criterion, device, save_dir, epoch):
             imgs = imgs.to(device)
             masks = masks.to(device)
             
-            # 前向传播
             outputs = model(imgs)
             loss = criterion(outputs, masks)
             total_loss += loss.item()
             
-            # 转numpy计算指标（用resize后的掩码）
             outputs_np = outputs.squeeze(1).cpu().numpy()  # [B, H, W]
             masks_np = masks.squeeze(1).cpu().numpy()      # [B, H, W]
             preds.extend(outputs_np)
@@ -76,17 +74,17 @@ def validate(model, loader, criterion, device, save_dir, epoch):
             
             # 保存预测结果（恢复到原始尺寸）
             for i, (ori_size, img_ori) in enumerate(zip(ori_sizes, img_oris)):
-                # 生成保存文件名（基于原始图像路径）
+                target_dir = os.path.join(save_dir, f'preds/{model_name}')
+                os.makedirs(target_dir, exist_ok=True)
+                
                 img_name = f"pred_{i}_{epoch}.png" if 'epoch' in locals() else f"pred_{i}.png"
-                save_path = os.path.join(save_dir, 'preds', img_name)
+                save_path = os.path.join(target_dir, img_name)
                 save_prediction(outputs_np[i], save_path, ori_size)
-    
-    # 计算指标
+                
     avg_loss = total_loss / len(loader)
     avg_cc, avg_kl = eval_metrics(preds, gts)
     print(f'Validate | Avg Loss: {avg_loss:.4f} | CC: {avg_cc:.4f} | KL Div: {avg_kl:.4f}')
     return avg_loss, avg_cc, avg_kl
-
 
 
 def main():
@@ -94,7 +92,6 @@ def main():
     device = get_device()
     print(f'Using device: {device}')
     
-    # 创建保存目录
     os.makedirs(args.save_dir, exist_ok=True)
     os.makedirs(os.path.join(args.save_dir, 'preds'), exist_ok=True)
     os.makedirs(os.path.join(args.save_dir, 'models'), exist_ok=True)
@@ -120,7 +117,7 @@ def main():
     elif args.model == 'unet':
         model = UNet_Baseline(n_channels=3, n_classes=1).to(device)
     elif args.model == 'unet-resnet18':
-        model = UNet_ResNet18(n_channels=3, n_classes=1).to(device)
+        model = UNet_ResNet18().to(device)
     elif args.model == 'mobilenetv3-unet':
         model = MobileNetV3_UNet(n_channels=3, n_classes=1).to(device)
     elif args.model == 'swin-unet':
@@ -141,15 +138,18 @@ def main():
         threshold_mode='abs', # 绝对改善阈值
         min_lr=1e-6           # 最小学习率
     )
+
     # 4. 训练+验证循环
-    writer = SummaryWriter(log_dir='./logs')
+    log_dir = f'./logs/{args.model}'
+    os.makedirs(log_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=log_dir)
     best_cc = 0.0
     early_stop_counter = 0
     early_stop_patience = 10  # 10个epoch没有改善就早停
     
     for epoch in range(1, args.epochs + 1):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch)
-        val_loss, val_cc, val_kl = validate(model, val_loader, criterion, device, args.save_dir)
+        val_loss, val_cc, val_kl = validate(model, val_loader, criterion, device, args.save_dir, epoch, args.model)
         
         # 更新学习率调度器（基于CC指标）
         scheduler.step(val_cc)
@@ -184,16 +184,14 @@ def main():
     writer.close()
 
     # 5. Grad_cam生成保存
-    if epoch == args.epochs or early_stop_counter >= early_stop_patience:
-        # 生成CAM可视化
-        save_cam_visualizations(
-            model, 
-            val_loader, 
-            device, 
-            args.save_dir, 
-            args.model,
-            img_size=args.img_size
-        )
+    save_cam_visualizations(
+        model, 
+        val_loader, 
+        device, 
+        args.save_dir, 
+        args.model,
+        img_size=args.img_size
+    )
 
 if __name__ == '__main__':
     main()

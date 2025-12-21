@@ -4,119 +4,9 @@ import torch.nn.functional as F
 import torchvision.models as models
 from torchvision.models import ResNet18_Weights, MobileNet_V3_Large_Weights
 
-# ---------------------- 基础FCN（保留） ----------------------
-class FCN8s_Baseline(nn.Module):
-    def __init__(self, num_classes=1):
-        super(FCN8s_Baseline, self).__init__()
-        vgg = models.vgg16(pretrained=True)
-        features = list(vgg.features.children())
-        
-        self.features1 = nn.Sequential(*features[:17])  # 下采样2倍
-        self.features2 = nn.Sequential(*features[17:24]) # 下采样4倍
-        self.features3 = nn.Sequential(*features[24:])   # 下采样8倍
-        
-        self.upsample8 = nn.ConvTranspose2d(512, num_classes, kernel_size=8, stride=8, padding=0)
-        self.upsample4 = nn.ConvTranspose2d(512, num_classes, kernel_size=4, stride=4, padding=0)
-        self.upsample2 = nn.ConvTranspose2d(256, num_classes, kernel_size=2, stride=2, padding=0)
-        
-        self.conv1x1_3 = nn.Conv2d(512, num_classes, kernel_size=1)
-        self.conv1x1_2 = nn.Conv2d(256, num_classes, kernel_size=1)
 
-    def forward(self, x):
-        x1 = self.features1(x)
-        x2 = self.features2(x1)
-        x3 = self.features3(x2)
-        
-        out3 = self.conv1x1_3(x3)
-        out3_up = self.upsample8(out3)
-        
-        out2 = self.conv1x1_2(x2)
-        out2_up = self.upsample4(out2)
-        
-        out1_up = self.upsample2(x1)
-        
-        out = out3_up + out2_up + out1_up
-        return out
-
-
-class EnhancedFCN(nn.Module):
-    def __init__(self, num_classes=1):
-        super(EnhancedFCN, self).__init__()
-        # 加载预训练VGG16
-        vgg = models.vgg16(pretrained=True)
-        features = list(vgg.features.children())
-        
-        # 编码器（提取更多特征）
-        self.encoder1 = nn.Sequential(*features[:5])    # 下采样2倍 [64]
-        self.encoder2 = nn.Sequential(*features[5:10])  # 下采样4倍 [128]
-        self.encoder3 = nn.Sequential(*features[10:17]) # 下采样8倍 [256]
-        self.encoder4 = nn.Sequential(*features[17:24]) # 下采样16倍 [512]
-        self.encoder5 = nn.Sequential(*features[24:])   # 下采样32倍 [512]
-        
-        # 中间过渡层（增加模型容量）
-        self.mid_conv = nn.Sequential(
-            nn.Conv2d(512, 512, 3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, 3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True)
-        )
-        
-        # 1x1卷积调整通道数
-        self.conv1 = nn.Conv2d(64, num_classes, 1)
-        self.conv2 = nn.Conv2d(128, num_classes, 1)
-        self.conv3 = nn.Conv2d(256, num_classes, 1)
-        self.conv4 = nn.Conv2d(512, num_classes, 1)
-        self.conv5 = nn.Conv2d(512, num_classes, 1)
-        
-        # 特征融合卷积（改进融合方式）
-        self.fuse_conv = nn.Sequential(
-            nn.Conv2d(num_classes * 5, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, num_classes, 3, padding=1)
-        )
-        
-        # 使用双线性插值上采样（避免棋盘效应）
-        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        
-    def forward(self, x):
-        # 编码器
-        e1 = self.encoder1(x)   # [B, 64, H/2, W/2]
-        e2 = self.encoder2(e1)  # [B, 128, H/4, W/4]
-        e3 = self.encoder3(e2)  # [B, 256, H/8, W/8]
-        e4 = self.encoder4(e3)  # [B, 512, H/16, W/16]
-        e5 = self.encoder5(e4)  # [B, 512, H/32, W/32]
-        
-        # 中间处理
-        e5 = self.mid_conv(e5)
-        
-        # 调整通道数
-        c1 = self.conv1(e1)  # [B, 1, H/2, W/2]
-        c2 = self.conv2(e2)  # [B, 1, H/4, W/4]
-        c3 = self.conv3(e3)  # [B, 1, H/8, W/8]
-        c4 = self.conv4(e4)  # [B, 1, H/16, W/16]
-        c5 = self.conv5(e5)  # [B, 1, H/32, W/32]
-        
-        # 上采样到统一尺寸（H/2, W/2）
-        c2_up = F.interpolate(c2, size=c1.shape[2:], mode='bilinear', align_corners=True)
-        c3_up = F.interpolate(c3, size=c1.shape[2:], mode='bilinear', align_corners=True)
-        c4_up = F.interpolate(c4, size=c1.shape[2:], mode='bilinear', align_corners=True)
-        c5_up = F.interpolate(c5, size=c1.shape[2:], mode='bilinear', align_corners=True)
-        
-        # 特征融合（拼接而不是简单相加）
-        fused = torch.cat([c1, c2_up, c3_up, c4_up, c5_up], dim=1)  # [B, 5, H/2, W/2]
-        fused = self.fuse_conv(fused)  # [B, 1, H/2, W/2]
-        
-        # 上采样到原始尺寸
-        output = self.upsample(fused)  # [B, 1, H, W]
-        
-        return output
-    
-
-# ---------------------- 基础U-Net（保留） ----------------------
 class DoubleConv(nn.Module):
+    """双卷积层：(Conv2d → BN → ReLU) × 2"""
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.double_conv = nn.Sequential(
@@ -131,30 +21,156 @@ class DoubleConv(nn.Module):
     def forward(self, x):
         return self.double_conv(x)
 
-class Down(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels)
-        )
-
-    def forward(self, x):
-        return self.maxpool_conv(x)
 
 class Up(nn.Module):
+    """可学习上采样模块：转置卷积 + 双卷积（带跳连）"""
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.up = nn.ConvTranspose2d(in_channels, in_channels//2, kernel_size=2, stride=2)
-        self.conv = DoubleConv(in_channels, out_channels)
+        # 转置卷积实现上采样（stride=2 → 尺寸×2）
+        self.up_conv = nn.ConvTranspose2d(
+            in_channels, in_channels // 2, kernel_size=2, stride=2
+        )
+        # 初始化转置卷积权重为双线性插值（缓解棋盘效应）
+        nn.init.kaiming_normal_(self.up_conv.weight, mode='fan_out', nonlinearity='relu')
+        self.conv = DoubleConv(in_channels, out_channels)  # 拼接后通道数：in_channels//2 + skip_channels = in_channels
 
     def forward(self, x1, x2):
-        x1 = self.up(x1)
+        """
+        x1: 解码器输入（小尺寸）
+        x2: 编码器跳连输入（大尺寸）
+        """
+        x1 = self.up_conv(x1)  # 上采样到x2的尺寸
+        # 对齐尺寸（防止padding导致的微小偏差）
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
         x1 = F.pad(x1, [diffX//2, diffX - diffX//2, diffY//2, diffY - diffY//2])
-        x = torch.cat([x2, x1], dim=1)
+        x = torch.cat([x2, x1], dim=1)  # 跳连拼接
         return self.conv(x)
+
+
+class FCN8s_Baseline(nn.Module):
+    def __init__(self, num_classes=1):
+        super(FCN8s_Baseline, self).__init__()
+        vgg = models.vgg16(pretrained=True)
+        features = list(vgg.features.children())
+        
+        self.features1 = nn.Sequential(*features[:5])   # 下2倍 → 128×128, 64通道
+        self.features2 = nn.Sequential(*features[5:10]) # 下4倍 → 64×64, 128通道
+        self.features3 = nn.Sequential(*features[10:17])# 下8倍 → 32×32, 256通道
+        
+        self.conv1x1_1 = nn.Conv2d(64, num_classes, kernel_size=1)
+        self.conv1x1_2 = nn.Conv2d(128, num_classes, kernel_size=1)
+        self.conv1x1_3 = nn.Conv2d(256, num_classes, kernel_size=1)
+        
+        # 转置卷积（严格匹配256×256输出）
+        self.upsample2 = nn.ConvTranspose2d(num_classes, num_classes, kernel_size=4, stride=2, padding=1)
+        self.upsample4 = nn.ConvTranspose2d(num_classes, num_classes, kernel_size=8, stride=4, padding=2)
+        self.upsample8 = nn.ConvTranspose2d(num_classes, num_classes, kernel_size=16, stride=8, padding=4)
+        
+        # 初始化转置卷积权重
+        for m in [self.upsample2, self.upsample4, self.upsample8]:
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+
+    def forward(self, x):
+        # 输入尺寸：256×256
+        x1 = self.features1(x)  # [B,64,128,128]
+        x2 = self.features2(x1) # [B,128,64,64]
+        x3 = self.features3(x2) # [B,256,32,32]
+        
+        out1 = self.conv1x1_1(x1)  # [B,1,128,128]
+        out2 = self.conv1x1_2(x2)  # [B,1,64,64]
+        out3 = self.conv1x1_3(x3)  # [B,1,32,32]
+        
+        # 上采样到256×256
+        out1_up = self.upsample2(out1)  # 128→256
+        out2_up = self.upsample4(out2)  # 64→256
+        out3_up = self.upsample8(out3)  # 32→256
+        
+        return out3_up + out2_up + out1_up
+
+
+class EnhancedFCN(nn.Module):
+    def __init__(self, num_classes=1):
+        super(EnhancedFCN, self).__init__()
+        vgg = models.vgg16(pretrained=True)
+        features = list(vgg.features.children())
+        
+        # 编码器（下采样2/4/8/16/32倍）
+        self.encoder1 = nn.Sequential(*features[:5])    # 128×128, 64
+        self.encoder2 = nn.Sequential(*features[5:10])  # 64×64, 128
+        self.encoder3 = nn.Sequential(*features[10:17]) # 32×32, 256
+        self.encoder4 = nn.Sequential(*features[17:24]) # 16×16, 512
+        self.encoder5 = nn.Sequential(*features[24:])   # 8×8, 512
+        
+        self.mid_conv = nn.Sequential(
+            nn.Conv2d(512, 512, 3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, 3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
+        
+        # 1×1降维
+        self.conv1 = nn.Conv2d(64, num_classes, 1)
+        self.conv2 = nn.Conv2d(128, num_classes, 1)
+        self.conv3 = nn.Conv2d(256, num_classes, 1)
+        self.conv4 = nn.Conv2d(512, num_classes, 1)
+        self.conv5 = nn.Conv2d(512, num_classes, 1)
+        
+        # 可学习上采样（替换插值）
+        self.up_c5 = nn.ConvTranspose2d(num_classes, num_classes, 2, stride=2)  # 8→16
+        self.up_c4 = nn.ConvTranspose2d(num_classes, num_classes, 2, stride=2)  # 16→32
+        self.up_c3 = nn.ConvTranspose2d(num_classes, num_classes, 2, stride=2)  # 32→64
+        self.up_c2 = nn.ConvTranspose2d(num_classes, num_classes, 2, stride=2)  # 64→128
+        self.up_final = nn.ConvTranspose2d(num_classes, num_classes, 2, stride=2) # 128→256
+        
+        # 特征融合
+        self.fuse_conv = nn.Sequential(
+            nn.Conv2d(num_classes * 5, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, num_classes, 3, padding=1)
+        )
+
+    def forward(self, x):
+        # 编码器
+        e1 = self.encoder1(x)  # [B,64,128,128]
+        e2 = self.encoder2(e1) # [B,128,64,64]
+        e3 = self.encoder3(e2) # [B,256,32,32]
+        e4 = self.encoder4(e3) # [B,512,16,16]
+        e5 = self.encoder5(e4) # [B,512,8,8]
+        e5 = self.mid_conv(e5)
+        
+        # 降维
+        c1 = self.conv1(e1)  # [B,1,128,128]
+        c2 = self.conv2(e2)  # [B,1,64,64]
+        c3 = self.conv3(e3)  # [B,1,32,32]
+        c4 = self.conv4(e4)  # [B,1,16,16]
+        c5 = self.conv5(e5)  # [B,1,8,8]
+        
+        # 可学习上采样到128×128
+        c5_up = self.up_c5(c5)  # 8→16
+        c5_up = self.up_c4(c5_up) # 16→32
+        c5_up = self.up_c3(c5_up) # 32→64
+        c5_up = self.up_c2(c5_up) # 64→128
+        
+        c4_up = self.up_c4(c4)  # 16→32
+        c4_up = self.up_c3(c4_up) # 32→64
+        c4_up = self.up_c2(c4_up) # 64→128
+        
+        c3_up = self.up_c3(c3)  # 32→64
+        c3_up = self.up_c2(c3_up) # 64→128
+        
+        c2_up = self.up_c2(c2)  # 64→128
+        
+        # 特征融合
+        fused = torch.cat([c1, c2_up, c3_up, c4_up, c5_up], dim=1)  # [B,5,128,128]
+        fused = self.fuse_conv(fused)  # [B,1,128,128]
+        
+        # 最终上采样到256×256
+        return self.up_final(fused)
+
 
 class OutConv(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -164,6 +180,7 @@ class OutConv(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
+
 class UNet_Baseline(nn.Module):
     def __init__(self, n_channels=3, n_classes=1):
         super(UNet_Baseline, self).__init__()
@@ -171,10 +188,11 @@ class UNet_Baseline(nn.Module):
         self.n_classes = n_classes
 
         self.inc = DoubleConv(n_channels, 64)
-        self.down1 = Down(64, 128)
-        self.down2 = Down(128, 256)
-        self.down3 = Down(256, 512)
-        self.down4 = Down(512, 1024)
+        self.down1 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(64, 128))
+        self.down2 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(128, 256))
+        self.down3 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(256, 512))
+        self.down4 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(512, 1024))
+        
         self.up1 = Up(1024, 512)
         self.up2 = Up(512, 256)
         self.up3 = Up(256, 128)
@@ -182,108 +200,200 @@ class UNet_Baseline(nn.Module):
         self.outc = OutConv(64, n_classes)
 
     def forward(self, x):
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
-        logits = self.outc(x)
-        return logits
+        # 输入：256×256
+        x1 = self.inc(x)       # 256×256, 64
+        x2 = self.down1(x1)    # 128×128, 128
+        x3 = self.down2(x2)    # 64×64, 256
+        x4 = self.down3(x3)    # 32×32, 512
+        x5 = self.down4(x4)    # 16×16, 1024
+        
+        x = self.up1(x5, x4)   # 32×32, 512
+        x = self.up2(x, x3)    # 64×64, 256
+        x = self.up3(x, x2)    # 128×128, 128
+        x = self.up4(x, x1)    # 256×256, 64
+        return self.outc(x)
+    
 
-# ---------------------- 新增：1. U-Net-ResNet18（ResNet18作为编码器） ----------------------
 class UNet_ResNet18(nn.Module):
-    def __init__(self, n_channels=3, n_classes=1):
-        super(UNet_ResNet18, self).__init__()
-        # 加载预训练ResNet18作为编码器
-        resnet = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        # 提取ResNet18的特征层（去掉全连接层）
-        self.encoder1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)  # [B,64,H/2,W/2]
-        self.encoder2 = nn.Sequential(resnet.maxpool, resnet.layer1)          # [B,64,H/4,W/4]
-        self.encoder3 = resnet.layer2                                         # [B,128,H/8,W/8]
-        self.encoder4 = resnet.layer3                                         # [B,256,H/16,W/16]
-        self.encoder5 = resnet.layer4                                         # [B,512,H/32,W/32]
+    def __init__(self, pretrained=True):
+        super().__init__()
+        # 加载预训练ResNet18并拆分编码器
+        resnet = models.resnet18(pretrained=pretrained)
+        self.encoder1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)  # 64通道, 1/2
+        self.encoder2 = nn.Sequential(resnet.maxpool, resnet.layer1)  # 64通道, 1/4
+        self.encoder3 = resnet.layer2  # 128通道, 1/8
+        self.encoder4 = resnet.layer3  # 256通道, 1/16
+        self.encoder5 = resnet.layer4  # 512通道, 1/32
 
-        # 解码器（适配ResNet特征通道数）
-        self.up1 = Up(512, 256)    # 512→256
-        self.up2 = Up(256, 128)    # 256→128
-        self.up3 = Up(128, 64)     # 128→64
-        self.up4 = Up(64, 64)      # 64→64
-        self.outc = OutConv(64, n_classes)
+        # 解码器：上采样+特征融合
+        self.decoder5 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.decoder4 = nn.ConvTranspose2d(256 + 256, 128, kernel_size=2, stride=2)
+        self.decoder3 = nn.ConvTranspose2d(128 + 128, 64, kernel_size=2, stride=2)
+        self.decoder2 = nn.ConvTranspose2d(64 + 64, 64, kernel_size=2, stride=2)
+        self.decoder1 = nn.ConvTranspose2d(64 + 64, 1, kernel_size=2, stride=2)
+
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        # 编码器前向（ResNet18特征提取）
-        x1 = self.encoder1(x)  # [B,64,H/2,W/2]
-        x2 = self.encoder2(x1) # [B,64,H/4,W/4]
-        x3 = self.encoder3(x2) # [B,128,H/8,W/8]
-        x4 = self.encoder4(x3) # [B,256,H/16,W/16]
-        x5 = self.encoder5(x4) # [B,512,H/32,W/32]
+        # 编码器提取多尺度特征
+        feat1 = self.encoder1(x)
+        feat2 = self.encoder2(feat1)
+        feat3 = self.encoder3(feat2)
+        feat4 = self.encoder4(feat3)
+        feat5 = self.encoder5(feat4)
 
-        # 解码器前向（跳连对应ResNet特征层）
-        x = self.up1(x5, x4)   # 512+256 → 256
-        x = self.up2(x, x3)    # 256+128 → 128
-        x = self.up3(x, x2)    # 128+64 → 64
-        x = self.up4(x, x1)    # 64+64 → 64
-        logits = self.outc(x)  # 64→1（回归输出）
-        return logits
+        # 解码器融合与上采样
+        dec5 = self.decoder5(feat5)
+        fuse4 = torch.cat([dec5, feat4], dim=1)
+        dec4 = self.decoder4(fuse4)
 
-# ---------------------- 新增：2. MobileNetv3 + U-Net（轻量级） ----------------------
+        fuse3 = torch.cat([dec4, feat3], dim=1)
+        dec3 = self.decoder3(fuse3)
+
+        fuse2 = torch.cat([dec3, feat2], dim=1)
+        dec2 = self.decoder2(fuse2)
+
+        fuse1 = torch.cat([dec2, feat1], dim=1)
+        out = self.decoder1(fuse1)
+
+        return self.sigmoid(out)
+    
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1):
+        super().__init__()
+        self.conv_block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size, padding=padding),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        return self.conv_block(x)
+
+class UpSampleBlock(nn.Module):
+    def __init__(self, in_channels, skip_channels, out_channels):
+        super().__init__()
+        self.up_conv = nn.ConvTranspose2d(
+            in_channels, out_channels, 
+            kernel_size=2, stride=2, padding=0, output_padding=0
+        )
+        nn.init.kaiming_normal_(self.up_conv.weight, mode='fan_out', nonlinearity='relu')
+        self.fuse_conv = ConvBlock(out_channels + skip_channels, out_channels)
+    
+    def forward(self, x, skip_x):
+        x = self.up_conv(x)
+        diffY = skip_x.size()[2] - x.size()[2]
+        diffX = skip_x.size()[3] - x.size()[3]
+        if diffY > 0 or diffX > 0:
+            x = F.pad(x, [diffX//2, diffX - diffX//2, diffY//2, diffY - diffY//2])
+
+        skip_x = F.interpolate(skip_x, size=x.shape[2:], mode='bilinear', align_corners=True)
+
+        x = torch.cat([x, skip_x], dim=1)
+        x = self.fuse_conv(x)
+        return x
+    
 class MobileNetV3_UNet(nn.Module):
     def __init__(self, n_channels=3, n_classes=1):
         super(MobileNetV3_UNet, self).__init__()
-        # 加载预训练MobileNetV3-Large（轻量级，也可换Small）
         mobilenet = models.mobilenet_v3_large(weights=MobileNet_V3_Large_Weights.IMAGENET1K_V1)
-        features = mobilenet.features  # MobileNetV3的特征提取层
-
-        # 提取MobileNetV3的关键特征层（按下采样倍数划分）
-        self.encoder1 = nn.Sequential(*features[:4])   # [B,24,H/2,W/2]
-        self.encoder2 = nn.Sequential(*features[4:7])  # [B,40,H/4,W/4]
-        self.encoder3 = nn.Sequential(*features[7:11]) # [B,80,H/8,W/8]
-        self.encoder4 = nn.Sequential(*features[11:16])# [B,112,H/16,W/16]
-        self.encoder5 = nn.Sequential(*features[16:])  # [B,960,H/32,W/32]
-
-        # 适配MobileNet通道数的解码器
-        self.up1 = Up(960, 112)  # 960→112
-        self.up2 = Up(112*2, 80) # 112+112→80
-        self.up3 = Up(80*2, 40)  # 80+80→40
-        self.up4 = Up(40*2, 24)  # 40+40→24
-        self.outc = nn.Conv2d(24, n_classes, kernel_size=1)  # 输出层
+        features = mobilenet.features
+        
+        self.encoder1 = nn.Sequential(*features[:4])   # [B,24,64,64]
+        self.encoder2 = nn.Sequential(*features[4:7])  # [B,40,32,32]
+        self.encoder3 = nn.Sequential(*features[7:11]) # [B,80,16,16]
+        self.encoder4 = nn.Sequential(*features[11:16])# [B,160,8,8]
+        self.encoder5 = nn.Sequential(*features[16:])  # [B,960,8,8]
+        
+        # 3. 瓶颈层（处理encoder5的高通道数）
+        self.bottleneck = ConvBlock(960, 160)  # 960→160，匹配encoder4通道数
+        
+        # 4. 解码器（完全适配MobileNetV3的通道/尺寸规律，无插值）
+        self.up4 = UpSampleBlock(in_channels=160, skip_channels=160, out_channels=80)
+        self.up3 = UpSampleBlock(in_channels=80, skip_channels=80, out_channels=40)
+        self.up2 = UpSampleBlock(in_channels=40, skip_channels=40, out_channels=24)
+        self.up1 = nn.Sequential(
+            nn.ConvTranspose2d(24, 24, kernel_size=4, stride=4, padding=0),  # 64→256，可训练
+            ConvBlock(24 + 24, 24)  # 拼接encoder1的24通道后融合
+        )
+        
+        self.out_conv = nn.Conv2d(24, n_classes, kernel_size=1)
 
     def forward(self, x):
-        # 编码器前向
-        x1 = self.encoder1(x)  # [B,24,H/2,W/2]
-        x2 = self.encoder2(x1) # [B,40,H/4,W/4]
-        x3 = self.encoder3(x2) # [B,80,H/8,W/8]
-        x4 = self.encoder4(x3) # [B,112,H/16,W/16]
-        x5 = self.encoder5(x4) # [B,960,H/32,W/32]
+        e1 = self.encoder1(x)  # [B,24,64,64]
+        e2 = self.encoder2(e1) # [B,40,32,32]
+        e3 = self.encoder3(e2) # [B,80,16,16]
+        e4 = self.encoder4(e3) # [B,160,8,8]
+        e5 = self.encoder5(e4) # [B,960,8,8]
 
-        # 解码器前向（上采样+拼接）
-        x = F.interpolate(x5, size=x4.shape[2:], mode='bilinear', align_corners=True)
-        x = torch.cat([x, x4], dim=1)
-        x = self.up1.conv(x)    # 复用DoubleConv
+        bottleneck = self.bottleneck(e5)  # [B,160,8,8]
+        
+        d4 = self.up4(bottleneck, e4)     # [B,80,16,16]（8×8→16×16，转置卷积）
+        d3 = self.up3(d4, e3)             # [B,40,32,32]（16×16→32×32，转置卷积）
+        d2 = self.up2(d3, e2)             # [B,24,64,64]（32×32→64×64，转置卷积）
+        # 最后一步上采样到256×256（64×64→256×256，转置卷积stride=4）
+        d1 = self.up1[0](d2)              # [B,24,256,256]
+        # 拼接encoder1的特征（先上采样encoder1到256×256）
+        e1_up = nn.ConvTranspose2d(24, 24, kernel_size=4, stride=4, padding=0).to(x.device)(e1)
+        d1 = torch.cat([d1, e1_up], dim=1)# [B,48,256,256]
+        d1 = self.up1[1](d1)              # [B,24,256,256]
+        
+        out = self.out_conv(d1)           # [B,1,256,256]
+        return out
 
-        x = F.interpolate(x, size=x3.shape[2:], mode='bilinear', align_corners=True)
-        x = torch.cat([x, x3], dim=1)
-        x = self.up2.conv(x)
+def window_partition(x, window_size):
+    """将特征图划分为窗口（确保H/W是window_size的整数倍）
+    x: [B, H, W, C]
+    return: [B*num_windows, window_size, window_size, C]
+    """
+    B, H, W, C = x.shape
+    assert H % window_size == 0 and W % window_size == 0, f"H/W {H}*{W} 不能被window_size {window_size} 整除"
+    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+    windows = windows.view(-1, window_size, window_size, C)
+    return windows
 
-        x = F.interpolate(x, size=x2.shape[2:], mode='bilinear', align_corners=True)
-        x = torch.cat([x, x2], dim=1)
-        x = self.up3.conv(x)
+def window_reverse(windows, window_size, H, W):
+    """将窗口合并为特征图
+    windows: [B*num_windows, window_size, window_size, C]
+    return: [B, H, W, C]
+    """
+    assert H % window_size == 0 and W % window_size == 0, f"H/W {H}*{W} 不能被window_size {window_size} 整除"
+    B = int(windows.shape[0] / (H * W / window_size / window_size))
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+    x = x.view(B, H, W, -1)
+    return x
 
-        x = F.interpolate(x, size=x1.shape[2:], mode='bilinear', align_corners=True)
-        x = torch.cat([x, x1], dim=1)
-        x = self.up4.conv(x)
+# 新增：padding特征图到能被window_size整除
+def pad_to_window_size(x, window_size):
+    """
+    x: [B, H, W, C]
+    return: padded_x, (pad_h, pad_w)
+    """
+    B, H, W, C = x.shape
+    pad_h = (window_size - H % window_size) % window_size
+    pad_w = (window_size - W % window_size) % window_size
+    if pad_h > 0 or pad_w > 0:
+        x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))  # pad (left,right,top,bottom) for H/W
+    return x, (pad_h, pad_w)
 
-        # 恢复到原始输入尺寸 + 输出
-        x = F.interpolate(x, size=x.shape[2:]*2, mode='bilinear', align_corners=True)
-        logits = self.outc(x)
-        return logits
+# 新增：去除padding
+def unpad_from_window_size(x, pad_h, pad_w):
+    """
+    x: [B, H+pad_h, W+pad_w, C]
+    return: [B, H, W, C]
+    """
+    if pad_h > 0 or pad_w > 0:
+        x = x[:, :-pad_h, :-pad_w, :] if pad_h > 0 and pad_w > 0 else x
+        x = x[:, :-pad_h, :, :] if pad_h > 0 and pad_w == 0 else x
+        x = x[:, :, :-pad_w, :] if pad_w > 0 and pad_h == 0 else x
+    return x
 
-# ---------------------- 新增：3. Swin-Unet（Transformer版） ----------------------
-# Swin Transformer基础模块
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=256, patch_size=4, in_chans=3, embed_dim=96):
         super().__init__()
@@ -293,7 +403,8 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        x = self.proj(x).flatten(2).transpose(1, 2)  # [B, num_patches, embed_dim]
+        x = self.proj(x)  # [B, C, H, W]
+        x = x.flatten(2).transpose(1, 2)  # [B, num_patches, embed_dim]
         return x
 
 class PatchMerging(nn.Module):
@@ -305,16 +416,16 @@ class PatchMerging(nn.Module):
 
     def forward(self, x, H, W):
         B, L, C = x.shape
+        assert L == H * W, "特征图尺寸不匹配"
         x = x.view(B, H, W, C)
-        # 分块合并
-        x0 = x[:, 0::2, 0::2, :]  # [B, H/2, W/2, C]
+        x0 = x[:, 0::2, 0::2, :]
         x1 = x[:, 1::2, 0::2, :]
         x2 = x[:, 0::2, 1::2, :]
         x3 = x[:, 1::2, 1::2, :]
-        x = torch.cat([x0, x1, x2, x3], -1)  # [B, H/2, W/2, 4C]
-        x = x.view(B, -1, 4 * C)  # [B, H/2*W/2, 4C]
+        x = torch.cat([x0, x1, x2, x3], -1)  # [B, H//2, W//2, 4*C]
+        x = x.view(B, -1, 4 * C)  # [B, num_patches//4, 4*C]
         x = self.norm(x)
-        x = self.reduction(x)  # [B, H/2*W/2, 2C]
+        x = self.reduction(x)  # [B, num_patches//4, 2*C]
         return x
 
 class Mlp(nn.Module):
@@ -339,14 +450,14 @@ class WindowAttention(nn.Module):
     def __init__(self, dim, window_size, num_heads):
         super().__init__()
         self.dim = dim
-        self.window_size = window_size
+        self.window_size = window_size  # 改为8，适配64×64
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
 
-        # 相对位置偏置
+        # 相对位置偏置：适配8×8窗口（(2*8-1)^2=225）
         self.relative_position_bias_table = nn.Parameter(
-            torch.zeros((2 * window_size - 1) * (2 * window_size - 1), num_heads))
+            torch.zeros((2 * self.window_size - 1) * (2 * self.window_size - 1), num_heads))
         coords = torch.arange(self.window_size)
         coords = torch.stack(torch.meshgrid([coords, coords], indexing="ij"))
         coords_flatten = torch.flatten(coords, 1)
@@ -363,12 +474,19 @@ class WindowAttention(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x):
+        """
+        x: [num_windows*B, window_size*window_size, C]
+        """
         B_, N, C = x.shape
+        assert N == self.window_size * self.window_size, f"输入窗口尺寸error"
+        
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
+        attn = (q @ k.transpose(-2, -1))  # [B_, num_heads, N, N]
+        
+        # 相对位置偏置：适配8×8窗口（225个偏置）
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size * self.window_size, self.window_size * self.window_size, -1)
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
@@ -380,41 +498,102 @@ class WindowAttention(nn.Module):
         return x
 
 class SwinBlock(nn.Module):
-    def __init__(self, dim, num_heads, window_size=7, mlp_ratio=4.):
+    def __init__(self, dim, num_heads, window_size=8, mlp_ratio=4.):
         super().__init__()
+        self.dim = dim
+        self.window_size = window_size  # 核心修改：7→8
         self.norm1 = nn.LayerNorm(dim)
         self.attn = WindowAttention(dim, window_size, num_heads)
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = Mlp(in_features=dim, hidden_features=int(dim * mlp_ratio))
 
-    def forward(self, x):
-        x = x + self.attn(self.norm1(x))
+    def forward(self, x, H, W):
+        B, L, C = x.shape
+
+        shortcut = x
+        
+        # 1. LayerNorm
+        x = self.norm1(x)
+        x = x.view(B, H, W, C)
+        
+        # 2. Padding到能被window_size整除（8）
+        x_padded, (pad_h, pad_w) = pad_to_window_size(x, self.window_size)
+        H_padded, W_padded = x_padded.shape[1], x_padded.shape[2]
+        
+        # 3. 划分窗口（8×8）
+        x_windows = window_partition(x_padded, self.window_size)  # [B*num_windows, 8,8,C]
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # [B*num_windows,64,C]
+        
+        # 4. 窗口注意力
+        attn_windows = self.attn(x_windows)  # [B*num_windows,64,C]
+        
+        # 5. 合并窗口
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        x = window_reverse(attn_windows, self.window_size, H_padded, W_padded)  # [B,H_padded,W_padded,C]
+        
+        # 6. 去除padding
+        x = unpad_from_window_size(x, pad_h, pad_w)  # [B,H,W,C]
+        x = x.view(B, H * W, C)  # [B,L,C]
+        
+        # 7. 残差
+        x = shortcut + x
+        
+        # 8. MLP
         x = x + self.mlp(self.norm2(x))
         return x
 
 class SwinStage(nn.Module):
-    def __init__(self, dim, depth, num_heads, window_size=7):
+    def __init__(self, dim, depth, num_heads, window_size=8):
         super().__init__()
         self.blocks = nn.ModuleList([SwinBlock(dim, num_heads, window_size) for _ in range(depth)])
         self.patch_merge = PatchMerging(dim)
 
     def forward(self, x, H, W):
+        """
+        x: [B, L, C] where L=H×W
+        return: x (当前层输出), x_down (下采样输出), H_new, W_new
+        """
         for block in self.blocks:
-            x = block(x)
+            x = block(x, H, W)
+        # 下采样
         x_down = self.patch_merge(x, H, W)
-        H, W = H // 2, W // 2
-        return x, x_down, H, W
+        H_new, W_new = H // 2, W // 2
+        return x, x_down, H_new, W_new
 
 class SwinUpBlock(nn.Module):
-    def __init__(self, dim, num_heads, window_size=7, mlp_ratio=4.):
+    def __init__(self, dim, num_heads, window_size=8, mlp_ratio=4.):
         super().__init__()
+        self.dim = dim
+        self.window_size = window_size
         self.norm1 = nn.LayerNorm(dim)
         self.attn = WindowAttention(dim, window_size, num_heads)
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = Mlp(in_features=dim, hidden_features=int(dim * mlp_ratio))
 
-    def forward(self, x):
-        x = x + self.attn(self.norm1(x))
+    def forward(self, x, H, W):
+        B, L, C = x.shape
+        assert L == H * W, "特征图尺寸不匹配"
+        shortcut = x
+        
+        # 窗口注意力
+        x = self.norm1(x)
+        x = x.view(B, H, W, C)
+        # Padding+窗口划分
+        x_padded, (pad_h, pad_w) = pad_to_window_size(x, self.window_size)
+        H_padded, W_padded = x_padded.shape[1], x_padded.shape[2]
+        x_windows = window_partition(x_padded, self.window_size)
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
+        # 注意力计算
+        attn_windows = self.attn(x_windows)
+        # 合并窗口+去padding
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        x = window_reverse(attn_windows, self.window_size, H_padded, W_padded)
+        x = unpad_from_window_size(x, pad_h, pad_w)
+        x = x.view(B, H * W, C)
+        # 残差
+        x = shortcut + x
+        
+        # MLP
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -423,59 +602,87 @@ class SwinUNet(nn.Module):
         super().__init__()
         self.img_size = img_size
         self.embed_dim = embed_dim
+        self.window_size = 8  # 核心修改：7→8
 
         # 编码器
-        self.patch_embed = PatchEmbed(img_size, 4, in_chans, embed_dim)
-        self.stage1 = SwinStage(embed_dim, depths[0], num_heads[0])
-        self.stage2 = SwinStage(2*embed_dim, depths[1], num_heads[1])
-        self.stage3 = SwinStage(4*embed_dim, depths[2], num_heads[2])
-        self.stage4 = SwinStage(8*embed_dim, depths[3], num_heads[3])
+        self.patch_embed = PatchEmbed(img_size, 4, in_chans, embed_dim)  # [B, 64×64=4096, 96]
+        self.stage1 = SwinStage(embed_dim, depths[0], num_heads[0], self.window_size)      # 64→32×32, 96→192
+        self.stage2 = SwinStage(2*embed_dim, depths[1], num_heads[1], self.window_size)    # 32→16×16, 192→384
+        self.stage3 = SwinStage(4*embed_dim, depths[2], num_heads[2], self.window_size)    # 16→8×8, 384→768
+        self.stage4 = SwinStage(8*embed_dim, depths[3], num_heads[3], self.window_size)    # 8→4×4, 768→1536
 
-        # 解码器
-        self.up4 = nn.Linear(8*embed_dim, 4*embed_dim, bias=False)
-        self.up_block4 = SwinUpBlock(4*embed_dim, num_heads[2])
-        self.up3 = nn.Linear(4*embed_dim, 2*embed_dim, bias=False)
-        self.up_block3 = SwinUpBlock(2*embed_dim, num_heads[1])
-        self.up2 = nn.Linear(2*embed_dim, embed_dim, bias=False)
-        self.up_block2 = SwinUpBlock(embed_dim, num_heads[0])
-
-        # 输出头（恢复图像尺寸）
-        self.up1 = nn.ConvTranspose2d(embed_dim, embed_dim//2, kernel_size=2, stride=2)
-        self.final_conv = nn.Conv2d(embed_dim//2, num_classes, kernel_size=1)
+        # 解码器：修正维度和形状转换逻辑
+        self.up4 = nn.Sequential(
+            nn.LayerNorm(1536),
+            nn.Linear(1536, 768),
+        )
+        self.up4_conv = nn.ConvTranspose2d(768, 768, 2, stride=2)  # 4×4→8×8
+        self.up_block4 = SwinUpBlock(768, num_heads[2], self.window_size)
+        
+        self.up3 = nn.Sequential(
+            nn.LayerNorm(768),
+            nn.Linear(768, 384),
+        )
+        self.up3_conv = nn.ConvTranspose2d(384, 384, 2, stride=2)  # 8×8→16×16
+        self.up_block3 = SwinUpBlock(384, num_heads[1], self.window_size)
+        
+        self.up2 = nn.Sequential(
+            nn.LayerNorm(384),
+            nn.Linear(384, 192),
+        )
+        self.up2_conv = nn.ConvTranspose2d(192, 192, 2, stride=2)  # 16×16→32×32
+        self.up_block2 = SwinUpBlock(192, num_heads[0], self.window_size)
+        
+        self.up1_conv = nn.ConvTranspose2d(192, 96, 2, stride=2)  # 32×32→64×64
+        self.final_up = nn.ConvTranspose2d(96, 96, 4, stride=4)  # 64×64→256×256
+        self.outc = nn.Conv2d(96, num_classes, kernel_size=1)
 
     def forward(self, x):
         B, C, H, W = x.shape
+        assert H == self.img_size and W == self.img_size, f"输入尺寸{H}×{W}≠{self.img_size}×{self.img_size}"
 
-        # 编码器前向
-        x_embed = self.patch_embed(x)  # [B, 64*64, 96] (256/4=64)
-        H1, W1 = 64, 64
-        x1, x2, H2, W2 = self.stage1(x_embed, H1, W1)  # x1:[B,64*64,96], x2:[B,32*32,192]
-        x2, x3, H3, W3 = self.stage2(x2, H2, W2)       # x2:[B,32*32,192], x3:[B,16*16,384]
-        x3, x4, H4, W4 = self.stage3(x3, H3, W3)       # x3:[B,16*16,384], x4:[B,8*8,768]
-        x4, _, _, _ = self.stage4(x4, H4, W4)          # x4:[B,8*8,768]
+        # -------------------------- 编码器 --------------------------
+        # PatchEmbed: [B,3,256,256] → [B, 64×64=4096, 96]
+        x_embed = self.patch_embed(x)  
+        # Stage1: 64×64→32×32, 96→192（64是8的倍数，无padding）
+        x1, x2, H2, W2 = self.stage1(x_embed, 64, 64)  # x1:[B,4096,96], x2:[B,1024,192]
+        # Stage2: 32×32→16×16, 192→384
+        x2, x3, H3, W3 = self.stage2(x2, H2, W2)       # x2:[B,1024,192], x3:[B,256,384]
+        # Stage3: 16×16→8×8, 384→768
+        x3, x4, H4, W4 = self.stage3(x3, H3, W3)       # x3:[B,256,384], x4:[B,64,768]
+        # Stage4: 8×8→4×4, 768→1536
+        x4, x5, H5, W5 = self.stage4(x4, H4, W4)       # x4:[B,64,768], x5:[B,16,1536]
 
-        # 解码器前向
-        x = self.up4(x4)  # [B,8*8,384]
-        x = x + x3        # 跳连
-        x = self.up_block4(x)
+        # -------------------------- 解码器 --------------------------
+        # Up4: 4×4→8×8, 1536→768
+        x = self.up4(x5)  # [B,16,768]
+        x = x.view(B, 4, 4, 768).permute(0, 3, 1, 2)  # [B,768,4,4]
+        x = self.up4_conv(x)  # [B,768,8,8]
+        x = x.permute(0,2,3,1).reshape(B, -1, 768)  # [B,64,768]
+        x = x + x4  # 残差连接
+        x = self.up_block4(x, 8, 8)  # 8×8特征图，8×8窗口
 
-        x = self.up3(x)   # [B,8*8,192] → 上采样到[B,16*16,192]
-        x = x.view(B, 8, 8, -1).permute(0, 3, 1, 2)
-        x = F.interpolate(x, size=(16,16), mode='bilinear', align_corners=True)
-        x = x.permute(0,2,3,1).reshape(B, -1, 192)
-        x = x + x2        # 跳连
-        x = self.up_block3(x)
+        # Up3: 8×8→16×16, 768→384
+        x = self.up3(x)  # [B,64,384]
+        x = x.view(B, 8, 8, 384).permute(0, 3, 1, 2)  # [B,384,8,8]
+        x = self.up3_conv(x)  # [B,384,16,16]
+        x = x.permute(0,2,3,1).reshape(B, -1, 384)  # [B,256,384]
+        x = x + x3  # 残差连接
+        x = self.up_block3(x, 16, 16)
 
-        x = self.up2(x)   # [B,16*16,96] → 上采样到[B,32*32,96]
-        x = x.view(B,16,16,-1).permute(0,3,1,2)
-        x = F.interpolate(x, size=(32,32), mode='bilinear', align_corners=True)
-        x = x.permute(0,2,3,1).reshape(B,-1,96)
-        x = x + x1        # 跳连
-        x = self.up_block2(x)
+        # Up2: 16×16→32×32, 384→192
+        x = self.up2(x)  # [B,256,192]
+        x = x.view(B, 16, 16, 192).permute(0, 3, 1, 2)  # [B,192,16,16]
+        x = self.up2_conv(x)  # [B,192,32,32]
+        x = x.permute(0,2,3,1).reshape(B, -1, 192)  # [B,1024,192]
+        x = x + x2  # 残差连接
+        x = self.up_block2(x, 32, 32)
 
-        # 恢复到原始图像尺寸
-        x = x.view(B, 32, 32, -1).permute(0, 3, 1, 2)  # [B,96,32,32]
-        x = self.up1(x)   # [B,48,64,64]
-        x = F.interpolate(x, size=(self.img_size, self.img_size), mode='bilinear', align_corners=True)
-        logits = self.final_conv(x)  # [B,1,256,256]
-        return logits
+        # Up1: 32×32→64×64→256×256
+        x = x.view(B, 32, 32, 192).permute(0, 3, 1, 2)  # [B,192,32,32]
+        x = self.up1_conv(x)  # [B,96,64,64]
+        x = self.final_up(x)  # [B,96,256,256]
+        
+        out = self.outc(x)  # [B,1,256,256]
+        return out
+
