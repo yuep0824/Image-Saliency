@@ -1,23 +1,24 @@
 import os
 import argparse
 import numpy as np
+from tqdm import tqdm
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 
 from model import FCN8s_Baseline, UNet_Baseline, UNet_ResNet18, MobileNetV3_UNet, SwinUNet
 from utils import SaliencyDataset, eval_metrics, save_prediction, get_device
+from grad_cam import save_cam_visualizations
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Saliency Prediction Baseline')
-    parser.add_argument('--train_root', type=str, default='./data/3-Saliency-TrainSet', help='训练集根目录')
-    parser.add_argument('--val_root', type=str, default='./data/3-Saliency-ValSet', help='验证集根目录')
-    parser.add_argument('--model', type=str, default='unet', 
-                        choices=['fcn', 'unet', 'unet-resnet18', 'mobilenetv3-unet', 'swin-unet'], 
-                        help='选择模型')
+    parser.add_argument('--data_root', type=str, default='./data', help='训练集根目录')
+    parser.add_argument('--model', type=str, default='unet', choices=['fcn', 'unet', 'unet-resnet18', 'mobilenetv3-unet', 'swin-unet'], help='选择模型')
     parser.add_argument('--img_size', type=tuple, default=(256, 256), help='图像尺寸')
     parser.add_argument('--batch_size', type=int, default=8, help='批次大小')
     parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
@@ -32,21 +33,16 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
     total_loss = 0.0
     pbar = tqdm(loader, desc=f'Train Epoch {epoch}')
     
-    # 适配返回值：img, mask, (ori_h, ori_w), mask_ori, img_ori
     for imgs, masks, _, _, _ in pbar:
         imgs = imgs.to(device)
         masks = masks.to(device)
         
-        # 前向传播
         outputs = model(imgs)
         loss = criterion(outputs, masks)
-        
-        # 反向传播
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
-        # 统计损失
         total_loss += loss.item()
         pbar.set_postfix({'loss': loss.item()})
     
@@ -67,21 +63,25 @@ def validate(model, loader, criterion, device, save_dir, epoch):
             imgs = imgs.to(device)
             masks = masks.to(device)
             
+            # 前向传播
             outputs = model(imgs)
             loss = criterion(outputs, masks)
             total_loss += loss.item()
             
-            outputs_np = outputs.squeeze(1).cpu().numpy()
-            masks_np = masks.squeeze(1).cpu().numpy()
+            # 转numpy计算指标（用resize后的掩码）
+            outputs_np = outputs.squeeze(1).cpu().numpy()  # [B, H, W]
+            masks_np = masks.squeeze(1).cpu().numpy()      # [B, H, W]
             preds.extend(outputs_np)
             gts.extend(masks_np)
             
-            # 修复文件名epoch未定义问题
+            # 保存预测结果（恢复到原始尺寸）
             for i, (ori_size, img_ori) in enumerate(zip(ori_sizes, img_oris)):
-                img_name = f"pred_epoch{epoch}_{i}.png"
+                # 生成保存文件名（基于原始图像路径）
+                img_name = f"pred_{i}_{epoch}.png" if 'epoch' in locals() else f"pred_{i}.png"
                 save_path = os.path.join(save_dir, 'preds', img_name)
                 save_prediction(outputs_np[i], save_path, ori_size)
     
+    # 计算指标
     avg_loss = total_loss / len(loader)
     avg_cc, avg_kl = eval_metrics(preds, gts)
     print(f'Validate | Avg Loss: {avg_loss:.4f} | CC: {avg_cc:.4f} | KL Div: {avg_kl:.4f}')
@@ -115,6 +115,8 @@ def main():
     # 2. 初始化模型
     if args.model == 'fcn':
         model = FCN8s_Baseline(num_classes=1).to(device)
+    elif args.model == 'fcn_enhance':
+        model = EnhancedFCN(num_classes=1).to(device)
     elif args.model == 'unet':
         model = UNet_Baseline(n_channels=3, n_classes=1).to(device)
     elif args.model == 'unet-resnet18':
@@ -128,22 +130,70 @@ def main():
     # 3. 损失函数与优化器（回归任务用MSE）
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    
+
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='max',           # 监控CC指标（越大越好）
+        factor=0.7,           # 学习率乘以0.5
+        patience=3,           # 3个epoch没有改善就降低学习率
+        verbose=True,         # 打印调整信息
+        threshold=0.001,      # 改善至少0.001才算有效
+        threshold_mode='abs', # 绝对改善阈值
+        min_lr=1e-6           # 最小学习率
+    )
     # 4. 训练+验证循环
+    writer = SummaryWriter(log_dir='./logs')
     best_cc = 0.0
+    early_stop_counter = 0
+    early_stop_patience = 10  # 10个epoch没有改善就早停
+    
     for epoch in range(1, args.epochs + 1):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch)
-        val_loss, val_cc, val_kl = validate(model, val_loader, criterion, device, args.save_dir, epoch)
+        val_loss, val_cc, val_kl = validate(model, val_loader, criterion, device, args.save_dir)
+        
+        # 更新学习率调度器（基于CC指标）
+        scheduler.step(val_cc)
+
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f'Epoch {epoch} | current lr: {current_lr:.2e}')
+
+        # tensorboard 可视化
+        writer.add_scalar('Loss/train', train_loss, epoch)      # 训练损失
+        writer.add_scalar('Loss/validation', val_loss, epoch)   # 验证损失
+        writer.add_scalar('Metric/CC', val_cc, epoch)           # CC值
+        writer.add_scalar('Metric/KL Divergence', val_kl, epoch)      # KL散度  
         
         # 保存最优模型（按CC指标）
         if val_cc > best_cc:
             best_cc = val_cc
-            torch.save(model.state_dict(), os.path.join(args.save_dir, 'models', 'best_model.pth'))
+            torch.save(model.state_dict(), os.path.join(args.save_dir, 'models', args.model+'_best_model.pth'))
             print(f'Best model saved (CC: {best_cc:.4f})')
+            early_stop_counter = 0
+        else:
+            early_stop_counter += 1
         
         # 按频率保存模型
         if epoch % args.save_freq == 0:
-            torch.save(model.state_dict(), os.path.join(args.save_dir, 'models', f'epoch_{epoch}.pth'))
+            torch.save(model.state_dict(), os.path.join(args.save_dir, 'models', args.model+f'_epoch_{epoch}.pth'))
+            
+        # 早停机制
+        if early_stop_counter >= early_stop_patience:
+            print(f' CC did not improve within {early_stop_patience} epochs.')
+            break
+            
+    writer.close()
+
+    # 5. Grad_cam生成保存
+    if epoch == args.epochs or early_stop_counter >= early_stop_patience:
+        # 生成CAM可视化
+        save_cam_visualizations(
+            model, 
+            val_loader, 
+            device, 
+            args.save_dir, 
+            args.model,
+            img_size=args.img_size
+        )
 
 if __name__ == '__main__':
     main()

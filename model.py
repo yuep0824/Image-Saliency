@@ -38,6 +38,83 @@ class FCN8s_Baseline(nn.Module):
         out = out3_up + out2_up + out1_up
         return out
 
+
+class EnhancedFCN(nn.Module):
+    def __init__(self, num_classes=1):
+        super(EnhancedFCN, self).__init__()
+        # 加载预训练VGG16
+        vgg = models.vgg16(pretrained=True)
+        features = list(vgg.features.children())
+        
+        # 编码器（提取更多特征）
+        self.encoder1 = nn.Sequential(*features[:5])    # 下采样2倍 [64]
+        self.encoder2 = nn.Sequential(*features[5:10])  # 下采样4倍 [128]
+        self.encoder3 = nn.Sequential(*features[10:17]) # 下采样8倍 [256]
+        self.encoder4 = nn.Sequential(*features[17:24]) # 下采样16倍 [512]
+        self.encoder5 = nn.Sequential(*features[24:])   # 下采样32倍 [512]
+        
+        # 中间过渡层（增加模型容量）
+        self.mid_conv = nn.Sequential(
+            nn.Conv2d(512, 512, 3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, 3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
+        
+        # 1x1卷积调整通道数
+        self.conv1 = nn.Conv2d(64, num_classes, 1)
+        self.conv2 = nn.Conv2d(128, num_classes, 1)
+        self.conv3 = nn.Conv2d(256, num_classes, 1)
+        self.conv4 = nn.Conv2d(512, num_classes, 1)
+        self.conv5 = nn.Conv2d(512, num_classes, 1)
+        
+        # 特征融合卷积（改进融合方式）
+        self.fuse_conv = nn.Sequential(
+            nn.Conv2d(num_classes * 5, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, num_classes, 3, padding=1)
+        )
+        
+        # 使用双线性插值上采样（避免棋盘效应）
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        
+    def forward(self, x):
+        # 编码器
+        e1 = self.encoder1(x)   # [B, 64, H/2, W/2]
+        e2 = self.encoder2(e1)  # [B, 128, H/4, W/4]
+        e3 = self.encoder3(e2)  # [B, 256, H/8, W/8]
+        e4 = self.encoder4(e3)  # [B, 512, H/16, W/16]
+        e5 = self.encoder5(e4)  # [B, 512, H/32, W/32]
+        
+        # 中间处理
+        e5 = self.mid_conv(e5)
+        
+        # 调整通道数
+        c1 = self.conv1(e1)  # [B, 1, H/2, W/2]
+        c2 = self.conv2(e2)  # [B, 1, H/4, W/4]
+        c3 = self.conv3(e3)  # [B, 1, H/8, W/8]
+        c4 = self.conv4(e4)  # [B, 1, H/16, W/16]
+        c5 = self.conv5(e5)  # [B, 1, H/32, W/32]
+        
+        # 上采样到统一尺寸（H/2, W/2）
+        c2_up = F.interpolate(c2, size=c1.shape[2:], mode='bilinear', align_corners=True)
+        c3_up = F.interpolate(c3, size=c1.shape[2:], mode='bilinear', align_corners=True)
+        c4_up = F.interpolate(c4, size=c1.shape[2:], mode='bilinear', align_corners=True)
+        c5_up = F.interpolate(c5, size=c1.shape[2:], mode='bilinear', align_corners=True)
+        
+        # 特征融合（拼接而不是简单相加）
+        fused = torch.cat([c1, c2_up, c3_up, c4_up, c5_up], dim=1)  # [B, 5, H/2, W/2]
+        fused = self.fuse_conv(fused)  # [B, 1, H/2, W/2]
+        
+        # 上采样到原始尺寸
+        output = self.upsample(fused)  # [B, 1, H, W]
+        
+        return output
+    
+
 # ---------------------- 基础U-Net（保留） ----------------------
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):

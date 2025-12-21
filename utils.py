@@ -109,13 +109,15 @@ def eval_metrics(preds, gts):
 
 # ---------------------- 可视化与保存（新增：恢复原始尺寸） ----------------------
 def save_prediction(pred, save_path, ori_size):
-    """保存预测显著图（恢复到原始图像尺寸）"""
+    """保存预测显著图（恢复到原始图像尺寸，修复类型错误）"""
     # 反归一化到[0,255]
     pred = (pred * 255).astype(np.uint8)
-    # 恢复原始尺寸
-    pred = cv2.resize(pred, (ori_size[1], ori_size[0]))  # (w, h)
+    # 修复：将ori_size转为纯整数元组（处理tensor/ndarray类型）
+    ori_w = int(ori_size[1]) if hasattr(ori_size[1], 'item') else ori_size[1]
+    ori_h = int(ori_size[0]) if hasattr(ori_size[0], 'item') else ori_size[0]
+    # 恢复原始尺寸（w, h）
+    pred = cv2.resize(pred, (ori_w, ori_h))
     cv2.imwrite(save_path, pred)
-
 # ---------------------- 工具函数（无需修改） ----------------------
 def get_device():
     return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
