@@ -89,6 +89,15 @@ def validate(model, loader, criterion, device, save_dir, epoch, model_name):
 
 def main():
     args = parse_args()
+
+    '''Initialization'''
+    args.data_root = '/root/autodl-tmp/Pro3/data'
+    args.model = 'fcn_enhance'
+    args.batch_size = 16
+    args.save_dir = '/root/autodl-tmp/Pro3/'
+    args.epochs = 50
+
+    
     device = get_device()
     print(f'Using device: {device}')
     

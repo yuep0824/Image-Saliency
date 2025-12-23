@@ -6,15 +6,15 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from utils import SaliencyDataset, get_device
-from model import FCN8s_Baseline, UNet_Baseline, EnhancedFCN
+from utils import SaliencyDataset, get_device, visualize_predictions, plot_all_training_metrics
+from model import FCN8s_Baseline, EnhancedFCN, UNet_Baseline, UNet_ResNet18, MobileNetV3_UNet, SwinUNet
 from grad_cam import save_cam_visualizations
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Model evaluation')
     parser.add_argument('--data_root', type=str, default='data', help='数据集根目录')
-    parser.add_argument('--model', type=str, default='unet', choices=['fcn', 'unet', 'fcn_enhance'], help='选择模型')
+    parser.add_argument('--model', type=str, default='mobilenetv3-unet', choices=['fcn', 'fcn_enhance', 'unet', 'unet-resnet18', 'mobilenetv3-unet', 'swin-unet'], help='选择模型')
     parser.add_argument('--img_size', type=tuple, default=(256, 256), help='图像尺寸')
     parser.add_argument('--batch_size', type=int, default=8, help='批次大小')
     parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
@@ -29,11 +29,17 @@ def load_best_model(args, device):
     
     # 根据模型类型创建模型架构
     if args.model == 'fcn':
-        model = FCN8s_Baseline(num_classes=1)
-    elif args.model == 'unet':
-        model = UNet_Baseline(n_channels=3, n_classes=1)
+        model = FCN8s_Baseline(num_classes=1).to(device)
     elif args.model == 'fcn_enhance':
-        model = EnhancedFCN(num_classes=1)
+        model = EnhancedFCN(num_classes=1).to(device)
+    elif args.model == 'unet':
+        model = UNet_Baseline(n_channels=3, n_classes=1).to(device)
+    elif args.model == 'unet-resnet18':
+        model = UNet_ResNet18().to(device)
+    elif args.model == 'mobilenetv3-unet':
+        model = MobileNetV3_UNet(n_channels=3, n_classes=1).to(device)
+    elif args.model == 'swin-unet':
+        model = SwinUNet(img_size=args.img_size[0], in_chans=3, num_classes=1).to(device)
     print(f'Loaded {args.model.upper()} model')
     
     # 加载模型权重
@@ -56,6 +62,8 @@ def load_valid_data(args, device):
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     return val_loader, val_dataset
 
+
+
 def main():
     args = parse_args()
     
@@ -70,15 +78,40 @@ def main():
     
     val_loader, _ = load_valid_data(args, device)
     model = load_best_model(args, device)
+    '''
     save_cam_visualizations(
         model, 
         val_loader, 
         device, 
         args.save_dir, 
         args.model,
-        10,
+        len(val_loader),
         args.img_size
     )
+    
+    visualize_predictions(
+        model,
+        val_loader,
+        device,
+        args.save_dir,
+        args.model,
+        len(val_loader)  
+    )
+    '''
+    # 设置日志目录
+    log_dir = os.path.join(args.save_dir, 'logs')
+    
+    if os.path.exists(log_dir):
+        print(f"\nLogfiles analyzing: {log_dir}")
+        
+        # 设置输出目录
+        output_dir = os.path.join(args.save_dir, 'training_analysis')
+        
+        # 绘制所有指标
+        plot_all_training_metrics(log_dir, output_dir)
+    else:
+        print(f"Warning: The direction of logfiles is not exist:{log_dir}")
+    
     
 if __name__ == '__main__':
     main()

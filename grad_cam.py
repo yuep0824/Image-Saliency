@@ -9,6 +9,7 @@ import cv2
 import random
 import numpy as np
 
+
 class GradCAM:
     def __init__(self, model, target_layer):
 
@@ -44,6 +45,13 @@ class GradCAM:
         
         gradients = self.gradients  # [1, C, H, W]
         activations = self.activations  # [1, C, H, W]
+
+        # 如果梯度是3维，重塑为4维
+        if gradients.dim() == 3:
+            B, L, C = gradients.shape
+            H = W = int(L ** 0.5)
+            gradients = gradients.permute(0, 2, 1).reshape(B, C, H, W)
+            activations = activations.permute(0, 2, 1).reshape(B, C, H, W)
         
         # 计算权重（全局平均池化）
         weights = torch.mean(gradients, dim=(2, 3), keepdim=True)  # [1, C, 1, 1]
@@ -58,7 +66,7 @@ class GradCAM:
         
         return cam.squeeze().cpu().numpy(), output.detach()
         
-    def visualize(self, input_tensor, original_tensor=None, save_path=None, img_size=(256, 256)):
+    def visualize(self, model_type, input_tensor, original_tensor=None, save_path=None, img_size=(256, 256)):
         
         cam, _ = self.generate_cam(input_tensor)
         
@@ -73,24 +81,51 @@ class GradCAM:
             
             # 将热图缩放到模型输入尺寸
             cam_resized = cv2.resize(cam, (img_size[1], img_size[0]))
+
+            fig = plt.figure(figsize=(12, 5))
+            
+            # 定义参数
+            image_width = 0.30  # 每个图像的宽度
+            cbar_width = 0.015  # colorbar宽度
+            gap = 0.01  # 元素之间的间距
+            
+            # 计算每个元素的水平起始位置
+            x0_img1 = 0.07
+            x0_img2 = x0_img1 + image_width + gap
+            x0_img3 = x0_img2 + image_width + gap
+            x0_cbar3 = x0_img3 + image_width + 0.01
+            
+            # 垂直位置 - 只考虑图像显示区域，不包括标题
+            y0_images = 0.12  # 图像底部位置
+            image_height = 0.72  # 图像高度
+            
+            # 创建图像轴
+            ax1 = fig.add_axes([x0_img1, y0_images, image_width, image_height])
+            ax2 = fig.add_axes([x0_img2, y0_images, image_width, image_height])
+            ax3 = fig.add_axes([x0_img3, y0_images, image_width, image_height])
+            
             
             # 原始图像（已经过与模型输入相同的预处理）
-            axes[0].imshow(img_to_show)
-            axes[0].set_title('Model Input Image')
-            axes[0].axis('off')
+            ax1.imshow(img_to_show)
+            ax1.set_title('Model Input Image',fontsize=12)
+            ax1.axis('off')
             
             # CAM热图（缩放到模型输入尺寸）
-            axes[1].imshow(cam_resized, cmap='hot')
-            axes[1].set_title('CAM Heatmap')
-            axes[1].axis('off')
+            im_cam = ax2.imshow(cam_resized, cmap='hot')
+            ax2.set_title(f'CAM Heatmap ({model_type})',fontsize=12)
+            ax2.axis('off')
             
             # 叠加显示
-            axes[2].imshow(img_to_show)
-            axes[2].imshow(cam_resized, cmap='hot', alpha=0.4)
-            axes[2].set_title('Overlay')
-            axes[2].axis('off')
+            ax3.imshow(img_to_show)
+            ax3.imshow(cam_resized, cmap='hot', alpha=0.4)
+            ax3.set_title('Overlay',fontsize=12)
+            ax3.axis('off')
+
+            # 添加colorbar
+            cax3 = fig.add_axes([x0_cbar3, ax3.get_position().y0, cbar_width, ax3.get_position().height])
+            fig.colorbar(im_cam, cax=cax3)
+            cax3.axis('off')
             
-            plt.tight_layout()
             
         else:
             # 只显示热图（调整到模型输入尺寸）
@@ -103,23 +138,31 @@ class GradCAM:
         
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
+            plt.close()
             print(f"Saved CAM visualization to {save_path}")
+            
         
         #plt.show()
-        plt.close()
+        
         return cam
 
 
 def get_target_layer_name(model_type, model):
     if model_type == 'fcn':
         # FCN模型的目标层：最后一个卷积层
-        return 'features3'
+        return 'upsample8'
+    elif model_type == 'fcn_enhance':
+        # EnhancedFCN：使用融合层
+        return 'fuse_conv'
     elif model_type == 'unet':
         # UNet模型的目标层：解码器中的最后一个卷积块
         return 'up4.conv.double_conv.4'  # 最后一个ReLU层
-    elif model_type == 'fcn_enhance':
-        # EnhancedFCN：使用encoder3第二个卷积层
-        return 'fuse_conv' 
+    elif model_type == 'unet-resnet18':
+        return 'decoder2'
+    elif model_type == 'mobilenetv3-unet':
+        return 'up1.1'
+    elif model_type == 'swin-unet':
+        return 'up_block2'
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -128,10 +171,10 @@ def save_cam_visualizations(model, dataloader, device, save_dir, model_type='une
 
     model.eval()
     
-    cam_dir = os.path.join(save_dir, 'cam_visualizations')
+    cam_dir = os.path.join(save_dir, 'cam_visualizations', model_type)
     os.makedirs(cam_dir, exist_ok=True)
 
-    random.seed(42)
+    random.seed(40)
     
     # 获取目标层名称
     target_layer = get_target_layer_name(model_type, model)
@@ -160,6 +203,7 @@ def save_cam_visualizations(model, dataloader, device, save_dir, model_type='une
             # 生成可视化
             save_path = os.path.join(cam_dir, model_type+f'_cam_sample_{i+1}.png')
             cam_generator.visualize(
+                model_type,
                 img_tensor, 
                 original_tensor=original_tensor,  # 使用预处理后的tensor
                 save_path=save_path, 
@@ -172,3 +216,5 @@ def save_cam_visualizations(model, dataloader, device, save_dir, model_type='une
             break
     
     print(f"All CAM visualizations saved to {cam_dir}")
+
+
