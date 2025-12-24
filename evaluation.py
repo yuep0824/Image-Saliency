@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from utils import SaliencyDataset, get_device, visualize_predictions, plot_all_training_metrics
+from utils import SaliencyDataset, get_device, visualize_predictions, plot_all_training_metrics, analyze_by_category_simple
 from model import FCN8s_Baseline, EnhancedFCN, UNet_Baseline, UNet_ResNet18, MobileNetV3_UNet, SwinUNet
 from grad_cam import save_cam_visualizations
 
@@ -62,8 +62,32 @@ def load_valid_data(args, device):
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     return val_loader, val_dataset
 
+def categories_analysis(args, device):
+    print("\n" + "="*60)
+    print("加载所有六个模型...")
+    print("="*60)
+    
+    model_dict = {}
+    model_types = ['fcn', 'fcn_enhance', 'unet', 'unet-resnet18', 'mobilenetv3-unet', 'swin-unet']
+    
+    for model_type in model_types:
+        args.model = model_type
+        model_dict[model_type] = load_best_model(args, device)
+        
+    print("\n" + "="*60)
+    print("开始按图像类别分析模型性能...")
+    print("="*60)
+    
+    results = analyze_by_category_simple(
+        model_dict=model_dict,
+        data_root=args.data_root,
+        img_size=args.img_size,
+        device=device,
+        save_dir=os.path.join(args.save_dir, 'category_analysis')
+    )
+    return
 
-
+    
 def main():
     args = parse_args()
     
@@ -97,7 +121,7 @@ def main():
         args.model,
         len(val_loader)  
     )
-    '''
+    
     # 设置日志目录
     log_dir = os.path.join(args.save_dir, 'logs')
     
@@ -111,7 +135,9 @@ def main():
         plot_all_training_metrics(log_dir, output_dir)
     else:
         print(f"Warning: The direction of logfiles is not exist:{log_dir}")
+    '''
     
+    categories_analysis(args, device)
     
 if __name__ == '__main__':
     main()

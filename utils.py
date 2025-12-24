@@ -6,6 +6,8 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from scipy import stats
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 # ---------------------- 替换为你的SaliencyDataset（修复潜在问题） ----------------------
@@ -511,6 +513,491 @@ def plot_all_training_metrics(log_dir, output_dir='./training_analysis'):
     print("Training logfiles have been analysed.".center(60))
     print(f"All results were saved to: {os.path.abspath(output_dir)}")
     print("="*60)
+
+
+# ---------------------- 分类分析函数 ----------------------
+def save_text_results(results, categories, model_names, save_dir):
+    """保存文本结果"""
+    text_path = os.path.join(save_dir, 'category_results.txt')
+    
+    with open(text_path, 'w') as f:
+        f.write("="*120 + "\n")
+        f.write("Models' performance on various categories\n".center(120))
+        f.write("="*120 + "\n\n")
+        
+        # 为每个类别创建表格
+        for category in categories:
+            f.write(f"Category: {category}\n")
+            f.write("-"*80 + "\n")
+            f.write(f"{'model':<20} {'CC mean':<12} {'KL mean':<12} {'samples':<10}\n")
+            f.write("-"*80 + "\n")
+            
+            for model_name in model_names:
+                cc_mean = results[model_name]['cc_mean_by_category'].get(category, 0)
+                kl_mean = results[model_name]['kl_mean_by_category'].get(category, 0)
+                sample_count = len(results[model_name]['cc_by_category'].get(category, []))
+                
+                f.write(f"{model_name:<20} {cc_mean:<12.4f} {kl_mean:<12.4f} {sample_count:<10}\n")
+            
+            f.write("\n")
+        
+        f.write("="*120 + "\n")
+    
+    print(f"Text results were saved to {text_path}.")
+
+def bar_cc_by_category(results, categories, model_names, save_dir):
+    """绘制CC指标的横向柱状图"""
+    # 准备数据
+    n_categories = len(categories)
+    n_models = len(model_names)
+    
+    # 为每个模型在每个类别上的平均CC
+    cc_matrix = np.zeros((n_categories, n_models))
+    
+    for i, category in enumerate(categories):
+        for j, model_name in enumerate(model_names):
+            cc_matrix[i, j] = results[model_name]['cc_mean_by_category'].get(category, 0)
+    
+    # 颜色方案
+    colors = plt.cm.Set3(np.linspace(0, 1, n_models))
+    
+    # 创建图形
+    plt.figure(figsize=(16, max(10, n_categories * 0.6)))
+    
+    y_pos = np.arange(n_categories)
+    bar_height = 0.8 / n_models
+    
+    for j, model_name in enumerate(model_names):
+        plt.barh(y_pos + j*bar_height - (n_models-1)*bar_height/2, 
+                cc_matrix[:, j], 
+                height=bar_height, 
+                color=colors[j], 
+                label=model_name,
+                edgecolor='black',
+                linewidth=0.5)
+    
+    plt.yticks(y_pos, categories, fontsize=10)
+    plt.xlabel('CC (Correlation Coefficient)', fontsize=10)
+    plt.title('CC on various categories', fontsize=12, fontweight='bold')
+    plt.grid(True, axis='x', alpha=0.3)
+    plt.legend(loc='lower right', fontsize=9, framealpha=0.9)
+    
+    # 为每个柱子添加数值标签
+    for i in range(n_categories):
+        for j in range(n_models):
+            x = cc_matrix[i, j]
+            y = y_pos[i] + j*bar_height - (n_models-1)*bar_height/2
+            if x > 0.01:  # 只显示有意义的数值
+                plt.text(x + 0.005, y, f'{x:.3f}', 
+                        va='center', fontsize=7, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    # 保存图像
+    save_path = os.path.join(save_dir, 'cc_by_category.png')
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    
+    print(f"CC柱状图已保存到: {save_path}")
+
+def bar_kl_by_category(results, categories, model_names, save_dir):
+    """绘制KL指标的横向柱状图"""
+    # 准备数据
+    n_categories = len(categories)
+    n_models = len(model_names)
+    
+    # 为每个模型在每个类别上的平均KL
+    kl_matrix = np.zeros((n_categories, n_models))
+    
+    for i, category in enumerate(categories):
+        for j, model_name in enumerate(model_names):
+            kl_matrix[i, j] = results[model_name]['kl_mean_by_category'].get(category, 0)
+    
+    # 颜色方案
+    colors = plt.cm.Set3(np.linspace(0, 1, n_models))
+    
+    # 创建图形
+    plt.figure(figsize=(16, max(10, n_categories * 0.6)))
+    
+    y_pos = np.arange(n_categories)
+    bar_height = 0.8 / n_models
+    
+    for j, model_name in enumerate(model_names):
+        plt.barh(y_pos + j*bar_height - (n_models-1)*bar_height/2, 
+                kl_matrix[:, j], 
+                height=bar_height, 
+                color=colors[j], 
+                label=model_name,
+                edgecolor='black',
+                linewidth=0.5)
+    
+    plt.yticks(y_pos, categories, fontsize=10)
+    plt.xlabel('KL Divergence', fontsize=10)
+    plt.title('KL Divergence on various categories.', fontsize=12, fontweight='bold')
+    plt.grid(True, axis='x', alpha=0.3)
+    plt.legend(loc='lower right', fontsize=9, framealpha=0.9)
+    
+    # 为每个柱子添加数值标签
+    for i in range(n_categories):
+        for j in range(n_models):
+            x = kl_matrix[i, j]
+            y = y_pos[i] + j*bar_height - (n_models-1)*bar_height/2
+            if x > 0.01:  # 只显示有意义的数值
+                plt.text(x + 0.005, y, f'{x:.3f}', 
+                        va='center', fontsize=7, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    # 保存图像
+    save_path = os.path.join(save_dir, 'kl_by_category.png')
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    
+    print(f"KL柱状图已保存到: {save_path}")
+
+def plot_cc_by_category(results, categories, model_names, save_dir):
+    """绘制CC指标的折线图（替代横向柱状图）"""
+    # 准备数据
+    n_categories = len(categories)
+    n_models = len(model_names)
+    
+    # 为每个模型在每个类别上的平均CC
+    cc_matrix = np.zeros((n_categories, n_models))
+    
+    for i, category in enumerate(categories):
+        for j, model_name in enumerate(model_names):
+            cc_matrix[i, j] = results[model_name]['cc_mean_by_category'].get(category, 0)
+    
+    # 颜色方案 - 使用Set2颜色映射
+    colors = plt.cm.Set2(np.linspace(0, 1, n_models))
+    
+    # 线型方案 - 不同的线型
+    line_styles = ['-', '--', '-.', ':', '-.', ':']
+    
+    # 模型显示名称（简写）
+    display_names = ['FCN', 'FCN-E', 'UNet', 'UNet-R18', 'MBV3-UNet', 'Swin-UNet']
+    
+    # 创建图形
+    plt.figure(figsize=(16, 8))
+    
+    # 绘制每个模型的折线
+    for j, (model_name, display_name) in enumerate(zip(model_names, display_names)):
+        x_pos = np.arange(n_categories)  # 类别位置
+        y_values = cc_matrix[:, j]  # 当前模型的CC值
+        
+        # 绘制折线，标记点为圆点
+        plt.plot(x_pos, y_values, 
+                label=display_name,
+                color=colors[j],
+                linestyle=line_styles[j],
+                linewidth=2.5,
+                marker='o',  # 标记点为圆点
+                markersize=6,
+                markerfacecolor=colors[j],
+                markeredgecolor='white',
+                markeredgewidth=1.5,
+                alpha=0.8)
+    
+    # 设置横轴标签
+    plt.xticks(np.arange(n_categories), categories, rotation=45, ha='right', fontsize=10)
+    plt.yticks(fontsize=10)
+    
+    # 设置轴标签
+    plt.xlabel('Categories', fontsize=12)
+    plt.ylabel('CC (Correlation Coefficient)', fontsize=12)
+    plt.title('CC Performance Across Categories', fontsize=14, fontweight='bold', pad=20)
+    
+    # 添加网格
+    plt.grid(True, alpha=0.3, linestyle='--')
+    plt.ylim(0, max(0.8, np.max(cc_matrix) * 1.1))  # 设置Y轴范围，留出顶部空间
+    
+    # 添加图例
+    plt.legend(loc='lower right', fontsize=10, framealpha=0.9, ncol=2)
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存图像
+    save_path = os.path.join(save_dir, 'cc_by_category_line.png')
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    
+    print(f"CC折线图已保存到: {save_path}")
+
+
+def plot_kl_by_category(results, categories, model_names, save_dir):
+    """绘制KL指标的折线图（替代横向柱状图）"""
+    # 准备数据
+    n_categories = len(categories)
+    n_models = len(model_names)
+    
+    # 为每个模型在每个类别上的平均KL
+    kl_matrix = np.zeros((n_categories, n_models))
+    
+    for i, category in enumerate(categories):
+        for j, model_name in enumerate(model_names):
+            kl_matrix[i, j] = results[model_name]['kl_mean_by_category'].get(category, 0)
+    
+    # 颜色方案 - 使用Set1颜色映射
+    colors = plt.cm.Set2(np.linspace(0, 1, n_models))
+    
+    # 线型方案 - 不同的线型
+    line_styles = ['-', '--', '-.', ':', '-.', ':']
+    
+    # 模型显示名称（简写）
+    display_names = ['FCN', 'FCN-E', 'UNet', 'UNet-R18', 'MBV3-UNet', 'Swin-UNet']
+    
+    # 创建图形
+    plt.figure(figsize=(16, 8))
+    
+    # 绘制每个模型的折线
+    for j, (model_name, display_name) in enumerate(zip(model_names, display_names)):
+        x_pos = np.arange(n_categories)  # 类别位置
+        y_values = kl_matrix[:, j]  # 当前模型的KL值
+        
+        # 绘制折线，标记点为圆点
+        plt.plot(x_pos, y_values, 
+                label=display_name,
+                color=colors[j],
+                linestyle=line_styles[j],
+                linewidth=2.5,
+                marker='o',  # 标记点为圆点
+                markersize=6,
+                markerfacecolor=colors[j],
+                markeredgecolor='white',
+                markeredgewidth=1.5,
+                alpha=0.8)
+    
+    # 设置横轴标签
+    plt.xticks(np.arange(n_categories), categories, rotation=45, ha='right', fontsize=10)
+    plt.yticks(fontsize=10)
+    
+    # 设置轴标签
+    plt.xlabel('Categories', fontsize=12)
+    plt.ylabel('KL Divergence', fontsize=12)
+    plt.title('KL Divergence Performance Across Categories', fontsize=14, fontweight='bold', pad=20)
+    
+    # 添加网格
+    plt.grid(True, alpha=0.3, linestyle='--')
+    
+    # 检查是否需要对数坐标轴（如果KL值差异很大）
+    y_max = np.max(kl_matrix)
+    if y_max > 10:  # 如果最大值超过10，使用对数坐标
+        plt.yscale('log')
+        plt.ylabel('KL Divergence (log scale)', fontsize=12)
+        plt.ylim(bottom=0.01)  # 设置对数坐标的最小值
+    else:
+        plt.ylim(0, y_max * 1.1)  # 线性坐标，留出顶部空间
+    
+    # 添加图例
+    plt.legend(loc='upper right', fontsize=10, framealpha=0.9, ncol=2)
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存图像
+    save_path = os.path.join(save_dir, 'kl_by_category_line.png')
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    
+    print(f"KL折线图已保存到: {save_path}")
+
+def save_overall_stats(results, categories, model_names, save_dir):
+    """保存整体统计信息"""
+    stats_path = os.path.join(save_dir, 'overall_statistics.txt')
+    
+    with open(stats_path, 'w') as f:
+        f.write("="*100 + "\n")
+        f.write("整体性能统计\n".center(100))
+        f.write("="*100 + "\n\n")
+        
+        # 计算每个模型的整体平均
+        f.write("各模型在所有类别上的平均性能:\n")
+        f.write("-"*80 + "\n")
+        f.write(f"{'模型':<20} {'整体平均CC':<15} {'整体平均KL':<15} {'最佳类别':<20} {'最差类别':<20}\n")
+        f.write("-"*80 + "\n")
+        
+        for model_name in model_names:
+            # 计算整体平均
+            all_cc = []
+            all_kl = []
+            for category in categories:
+                cc_values = results[model_name]['cc_by_category'].get(category, [])
+                kl_values = results[model_name]['kl_by_category'].get(category, [])
+                all_cc.extend(cc_values)
+                all_kl.extend(kl_values)
+            
+            if all_cc:
+                overall_cc = np.mean(all_cc)
+                overall_kl = np.mean(all_kl)
+            else:
+                overall_cc = 0
+                overall_kl = 0
+            
+            # 找到最佳和最差类别（按CC）
+            category_cc_means = []
+            for category in categories:
+                cc_mean = results[model_name]['cc_mean_by_category'].get(category, 0)
+                category_cc_means.append((category, cc_mean))
+            
+            if category_cc_means:
+                best_category = max(category_cc_means, key=lambda x: x[1])[0]
+                worst_category = min(category_cc_means, key=lambda x: x[1])[0]
+            else:
+                best_category = "N/A"
+                worst_category = "N/A"
+            
+            f.write(f"{model_name:<20} {overall_cc:<15.4f} {overall_kl:<15.4f} {best_category:<20} {worst_category:<20}\n")
+        
+        f.write("\n" + "="*100 + "\n")
+        
+        # 按类别统计
+        f.write("\n\n按类别统计最佳模型:\n")
+        f.write("="*100 + "\n")
+        
+        for category in categories:
+            f.write(f"\n类别: {category}\n")
+            f.write("-"*80 + "\n")
+            
+            # 收集该类别下所有模型的CC值
+            model_cc = []
+            for model_name in model_names:
+                cc_mean = results[model_name]['cc_mean_by_category'].get(category, 0)
+                model_cc.append((model_name, cc_mean))
+            
+            # 按CC值排序
+            model_cc_sorted = sorted(model_cc, key=lambda x: x[1], reverse=True)
+            
+            for rank, (model_name, cc_mean) in enumerate(model_cc_sorted, 1):
+                f.write(f"  第{rank}名: {model_name:<20} CC={cc_mean:.4f}\n")
+        
+        f.write("\n" + "="*100 + "\n")
+    
+    print(f"整体统计已保存到: {stats_path}")
+
+def analyze_by_category_simple(model_dict, data_root, img_size=(256, 256), device='cuda', save_dir=None):
+
+    # 创建保存目录
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 验证集路径
+    testset_root = os.path.join(data_root, '3-Saliency-TestSet')
+    
+    # 获取图像和显著图图的根目录
+    stimuli_root = os.path.join(testset_root, 'Stimuli')
+    fixation_root = os.path.join(testset_root, 'FIXATIONMAPS')
+
+    # 获取所有类别（子文件夹）
+    categories = sorted([d for d in os.listdir(stimuli_root) 
+                        if os.path.isdir(os.path.join(stimuli_root, d))])
+    
+    print(f"{len(categories)} categories were found.")
+    
+    # 初始化结果字典
+    results = {}
+    model_names = list(model_dict.keys())
+    
+    for model_name in model_names:
+        results[model_name] = {
+            'cc_by_category': {category: [] for category in categories},
+            'kl_by_category': {category: [] for category in categories},
+            'cc_mean_by_category': {},
+            'kl_mean_by_category': {}
+        }
+    
+    # 设置模型为评估模式
+    for model in model_dict.values():
+        model.eval()
+    
+    # 遍历每个类别
+    for category in tqdm(categories, desc="categories"):
+        category_stimuli_dir = os.path.join(stimuli_root, category)
+        category_fixation_dir = os.path.join(fixation_root, category)
+        
+        # 获取该类别下的所有图像文件
+        image_files = []
+        for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff']:
+            image_files.extend([f for f in os.listdir(category_stimuli_dir) 
+                              if f.lower().endswith(ext)])
+        
+        print(f"\n{category}: {len(image_files)} images")
+        
+        # 处理每个图像
+        for img_file in tqdm(image_files, desc=f"processing {category}", leave=False):
+            # 构建完整路径
+            img_path = os.path.join(category_stimuli_dir, img_file)
+            
+            # 查找对应的显著图
+            mask_path = img_path.replace("Stimuli", "FIXATIONMAPS")            
+            if not os.path.exists(mask_path):
+                print(f"Warning: the fixationmap of {img_file} is not exist.")
+                continue
+            
+            # 加载图像和显著图
+            img = cv2.imread(img_path)            
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img, img_size)
+            
+            mask = cv2.imread(mask_path, 0)  # 灰度图            
+            mask = cv2.resize(mask, img_size)
+            
+            img_tensor = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.0
+            img_tensor = img_tensor.unsqueeze(0).to(device)
+            mask_np = mask.astype(np.float32) / 255.0
+            
+            # 确保mask在[0,1]范围内
+            if mask_np.max() > 1.0:
+                mask_np = (mask_np - mask_np.min()) / (mask_np.max() - mask_np.min() + 1e-8)
+            
+            # 对每个模型进行预测
+            for model_name, model in model_dict.items():
+                with torch.no_grad():
+                    pred = model(img_tensor)
+                    pred_np = pred.squeeze().cpu().numpy()
+                    
+                    # 确保预测显著图在[0,1]范围
+                    if pred_np.min() < 0 or pred_np.max() > 1:
+                        pred_np = (pred_np - pred_np.min()) / (pred_np.max() - pred_np.min() + 1e-8)
+                    
+                    # 调整预测图尺寸到与mask相同（如果不同）
+                    if pred_np.shape != mask_np.shape:
+                        pred_np = cv2.resize(pred_np, (mask_np.shape[1], mask_np.shape[0]))
+                    
+                    # 计算CC和KL
+                    cc = calculate_cc(pred_np, mask_np)
+                    kl = calculate_kl_div(pred_np, mask_np)
+                    
+                    # 保存结果
+                    results[model_name]['cc_by_category'][category].append(cc)
+                    results[model_name]['kl_by_category'][category].append(kl)
+
+        # 计算每个模型在当前类别的平均指标
+        for model_name in model_names:
+            if results[model_name]['cc_by_category'][category]:
+                cc_values = results[model_name]['cc_by_category'][category]
+                kl_values = results[model_name]['kl_by_category'][category]
+                
+                results[model_name]['cc_mean_by_category'][category] = np.mean(cc_values)
+                results[model_name]['kl_mean_by_category'][category] = np.mean(kl_values)
+            else:
+                results[model_name]['cc_mean_by_category'][category] = 0
+                results[model_name]['kl_mean_by_category'][category] = 0
+    
+    # 保存结果到文本文件
+    save_text_results(results, categories, model_names, save_dir)
+    
+    # 分别绘制CC和KL的横向柱状图
+    bar_cc_by_category(results, categories, model_names, save_dir)
+    bar_kl_by_category(results, categories, model_names, save_dir)
+    plot_cc_by_category(results, categories, model_names, save_dir)
+    plot_kl_by_category(results, categories, model_names, save_dir)
+    
+    # 计算并保存整体统计
+    save_overall_stats(results, categories, model_names, save_dir)
+    
+    print(f"\nAnalysis by categories were completed! Results were saved to {save_dir}")
+    
+    return results
 
 
 # ---------------------- 工具函数（无需修改） ----------------------
